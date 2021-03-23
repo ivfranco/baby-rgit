@@ -1,8 +1,16 @@
-use std::{convert::TryFrom, env, ffi::OsString, fs::FileType, io::{BufRead, Cursor}, mem, time::{SystemTime, SystemTimeError}};
 use sha2::{Digest, Sha256};
+use std::{
+    convert::TryFrom,
+    env,
+    ffi::OsString,
+    fs::FileType,
+    io::{BufRead, Cursor},
+    mem,
+    time::{SystemTime, SystemTimeError},
+};
 
-use crate::Error;
-use std::io::{self, Read, Write};
+use crate::{Error, ReadWriteLE};
+use std::io::{self, Read};
 
 /// Name of the environment variable containing the path to the directory cache.
 pub const DB_ENVIRONMENT: &str = "SHA_FILE_DIRECTORY";
@@ -12,34 +20,6 @@ pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache/objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
 const CACHE_SIGNATURE:u32 = 0x44495243	/* "DIRC" */;
-
-/// Helper trait to read and write primitive number types.
-pub trait ReadWriteLE: Sized {
-    /// Read the number in little-endian order.
-    fn read_le<R: Read>(reader: R) -> io::Result<Self>;
-
-    /// Write the number in little-endian order.
-    fn write_le<W: Write>(self, writer: W) -> io::Result<()>;
-}
-
-macro_rules! impl_read_write_le {
-    ($ty: ty) => {
-        impl ReadWriteLE for $ty {
-            fn read_le<R: Read>(mut reader: R) -> io::Result<Self> {
-                let mut buf = [0u8; mem::size_of::<$ty>()];
-                reader.read_exact(&mut buf)?;
-                Ok(Self::from_le_bytes(buf))
-            }
-
-            fn write_le<W: Write>(self, mut writer: W) -> io::Result<()> {
-                writer.write_all(&self.to_le_bytes())
-            }
-        }
-    }
-}
-
-impl_read_write_le!(u32);
-impl_read_write_le!(u64);
 
 fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::Result<()> {
     loop {
@@ -63,13 +43,13 @@ struct CacheHeader {
 }
 
 impl CacheHeader {
-    const fn size() -> usize {
-        mem::size_of::<u32>() * 3 + SHA256_OUTPUT_LEN
+    const fn size_without_sha() -> usize {
+        mem::size_of::<u32>() * 3
     }
 
     fn read_and_verify<R: BufRead>(reader: &mut R, size: u64) -> Result<Self, Error> {
         // there's no mmap in safe Rust, wonder how different would the performance be
-        let mut buf = [0u8; Self::size()];
+        let mut buf = [0u8; Self::size_without_sha()];
         reader.read_exact(&mut buf)?;
         let mut cursor = Cursor::new(&buf);
 
@@ -85,7 +65,7 @@ impl CacheHeader {
 
         let entries = u32::read_le(&mut cursor)?;
         let mut sha256 = [0u8; SHA256_OUTPUT_LEN];
-        cursor.read_exact(&mut sha256)?;
+        reader.read_exact(&mut sha256)?;
 
         let mut hasher = Sha256::new();
         hasher.update(&buf);
@@ -144,21 +124,24 @@ struct CacheEntry {
 impl CacheEntry {
     /// The size of a cache entry when serialized to the disk in the most obvious way.
     pub fn ce_size(&self) -> usize {
-        mem::size_of::<FileStat>() +    /* file stats with default memory layout */ 
-        SHA256_OUTPUT_LEN +             /* SHA256 */ 
+        mem::size_of::<FileStat>() +    /* file stats with default memory layout */
+        SHA256_OUTPUT_LEN +             /* SHA256 */
         mem::size_of::<usize>() +       /* length of file name */
         self.name.len() +               /* file name */
-        8                               /* why? */
+        8 /* why? */
     }
 }
 
 /// A directory cache.
-pub struct DirCache;
+pub struct DirCache {
+    // all global variables go in here
+}
 
 impl DirCache {
     /// Initialize the cache information.
     pub fn read_cache() -> Result<Self, Error> {
-        let dir = env::var_os(DB_ENVIRONMENT).unwrap_or_else(|| OsString::from(DEFAULT_DB_ENVIRONMENT));
+        let dir =
+            env::var_os(DB_ENVIRONMENT).unwrap_or_else(|| OsString::from(DEFAULT_DB_ENVIRONMENT));
         unimplemented!()
     }
 
