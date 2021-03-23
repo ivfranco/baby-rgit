@@ -18,6 +18,10 @@ pub enum Error {
     /// Header file corrupted.
     #[error("Header corrupted: {0}")]
     CorruptedHeader(&'static str),
+
+    /// Cache entry corrupted.
+    #[error("Entry corrupted: {0}")]
+    CorruptedEntry(&'static str),
 }
 
 impl Debug for Error {

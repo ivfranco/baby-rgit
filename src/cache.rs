@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use sha2::{Digest, Sha256};
 use std::{
     convert::TryFrom,
@@ -19,7 +20,7 @@ pub const DB_ENVIRONMENT: &str = "SHA_FILE_DIRECTORY";
 pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache/objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
-const CACHE_SIGNATURE:u32 = 0x44495243	/* "DIRC" */;
+const CACHE_SIGNATURE: u32 = u32::from_be_bytes(*b"DIRC");
 
 fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::Result<()> {
     loop {
@@ -34,6 +35,17 @@ fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::
     Ok(())
 }
 
+///  0                   1                   2                   3    \
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1  \
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
+/// |                            Signature                          | \
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
+/// |                             Version                           | \
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
+/// |                             Entries                           | \
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
+/// |                             SHA256                            | \
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
 struct CacheHeader {
     signature: u32,
     version: u32,
@@ -43,13 +55,18 @@ struct CacheHeader {
 }
 
 impl CacheHeader {
-    const fn size_without_sha() -> usize {
+    const fn on_disk_size_without_sha() -> usize {
         mem::size_of::<u32>() * 3
     }
 
+    const fn on_disk_size() -> usize {
+        Self::on_disk_size() + SHA256_OUTPUT_LEN
+    }
+
     fn read_and_verify<R: BufRead>(reader: &mut R, size: u64) -> Result<Self, Error> {
-        // there's no mmap in safe Rust, wonder how different would the performance be
-        let mut buf = [0u8; Self::size_without_sha()];
+        // there's no mmap in safe Rust, we cannot use it anyway as Rust does not guarantee memory
+        // layout of structs, wonder how different would the performance be
+        let mut buf = [0u8; Self::on_disk_size_without_sha()];
         reader.read_exact(&mut buf)?;
         let mut cursor = Cursor::new(&buf);
 
@@ -92,6 +109,14 @@ struct CacheTime {
     nsec: u32,
 }
 
+impl CacheTime {
+    fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let sec = u32::read_le(&mut *reader)?;
+        let nsec = u32::read_le(&mut *reader)?;
+        Ok(Self { sec, nsec })
+    }
+}
+
 impl TryFrom<SystemTime> for CacheTime {
     type Error = SystemTimeError;
 
@@ -104,6 +129,40 @@ impl TryFrom<SystemTime> for CacheTime {
     }
 }
 
+bitflags! {
+    /// There's only 3 bits of reliably available information from std::io::FileType:
+    /// - FileType::is_dir
+    /// - FileType::is_file
+    /// - FileType::is_symlink
+    struct FileMode: u32 {
+        const IS_DIR        = 0b0001;
+        const IS_FILE       = 0b0010;
+        const IS_SYMLINK    = 0b0100;
+    }
+}
+
+impl FileMode {
+    fn new(file_type: FileType) -> Self {
+        let mut flags = Self::empty();
+        if file_type.is_dir() {
+            flags.insert(Self::IS_DIR);
+        }
+        if file_type.is_file() {
+            flags.insert(Self::IS_FILE);
+        }
+        if file_type.is_symlink() {
+            flags.insert(Self::IS_SYMLINK);
+        }
+
+        flags
+    }
+
+    fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let bits = u32::read_le(reader)?;
+        Self::from_bits(bits).ok_or(Error::CorruptedEntry("unknown file mode"))
+    }
+}
+
 /// A lot of the entries in the original C implementation will be missing, device number / uid / gid
 /// / inode as a concept doesn't exist on a few platforms supported by stable Rust, hopefully the
 /// extra robustness of SHA256 over SHA1 would be sufficient for the purpose.
@@ -111,8 +170,24 @@ impl TryFrom<SystemTime> for CacheTime {
 struct FileStat {
     created: CacheTime,
     modified: CacheTime,
-    file_type: FileType,
-    file_size: u64,
+    mode: FileMode,
+    size: u64,
+}
+
+impl FileStat {
+    fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let created = CacheTime::read(&mut *reader)?;
+        let modified = CacheTime::read(&mut *reader)?;
+        let mode = FileMode::read(&mut *reader)?;
+        let size = u64::read_le(&mut *reader)?;
+
+        Ok(Self {
+            created,
+            modified,
+            mode,
+            size,
+        })
+    }
 }
 
 struct CacheEntry {
@@ -142,6 +217,7 @@ impl DirCache {
     pub fn read_cache() -> Result<Self, Error> {
         let dir =
             env::var_os(DB_ENVIRONMENT).unwrap_or_else(|| OsString::from(DEFAULT_DB_ENVIRONMENT));
+
         unimplemented!()
     }
 
