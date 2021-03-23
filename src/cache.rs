@@ -3,10 +3,10 @@ use sha2::{Digest, Sha256};
 use std::{
     convert::TryFrom,
     env,
-    ffi::OsString,
-    fs::FileType,
-    io::{BufRead, Cursor},
+    fs::{self, File, FileType},
+    io::{BufRead, BufReader, Cursor, Seek, SeekFrom},
     mem,
+    path::Path,
     time::{SystemTime, SystemTimeError},
 };
 
@@ -21,6 +21,7 @@ pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache/objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
 const CACHE_SIGNATURE: u32 = u32::from_be_bytes(*b"DIRC");
+const CACHE_VERSION: u32 = 1;
 
 fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::Result<()> {
     loop {
@@ -35,21 +36,10 @@ fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::
     Ok(())
 }
 
-///  0                   1                   2                   3    \
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1  \
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
-/// |                            Signature                          | \
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
-/// |                             Version                           | \
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
-/// |                             Entries                           | \
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
-/// |                             SHA256                            | \
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ \
 struct CacheHeader {
     signature: u32,
     version: u32,
-    entries: u32,
+    entries: usize,
     // sha1 has been deprecated
     sha256: [u8; SHA256_OUTPUT_LEN],
 }
@@ -76,17 +66,18 @@ impl CacheHeader {
         }
 
         let version = u32::read_le(&mut cursor)?;
-        if version != 1 {
+        if version != CACHE_VERSION {
             return Err(Error::CorruptedHeader("bad version"));
         }
 
-        let entries = u32::read_le(&mut cursor)?;
+        let entries = u32::read_le(&mut cursor)? as usize;
+
         let mut sha256 = [0u8; SHA256_OUTPUT_LEN];
         reader.read_exact(&mut sha256)?;
 
         let mut hasher = Sha256::new();
         hasher.update(&buf);
-        digest_buffered(&mut hasher, reader.take(size - buf.len() as u64))?;
+        digest_buffered(&mut hasher, reader.take(size - Self::on_disk_size() as u64))?;
 
         if hasher.finalize().as_slice() != sha256 {
             return Err(Error::CorruptedHeader("wrong sha256 signature"));
@@ -134,6 +125,7 @@ bitflags! {
     /// - FileType::is_dir
     /// - FileType::is_file
     /// - FileType::is_symlink
+    #[repr(transparent)] /* make sure it has the same size as a u32 */
     struct FileMode: u32 {
         const IS_DIR        = 0b0001;
         const IS_FILE       = 0b0010;
@@ -167,14 +159,18 @@ impl FileMode {
 /// / inode as a concept doesn't exist on a few platforms supported by stable Rust, hopefully the
 /// extra robustness of SHA256 over SHA1 would be sufficient for the purpose.
 #[derive(Clone, Copy)]
-struct FileStat {
+struct FileStats {
     created: CacheTime,
     modified: CacheTime,
     mode: FileMode,
     size: u64,
 }
 
-impl FileStat {
+impl FileStats {
+    const fn on_disk_size() -> usize {
+        mem::size_of::<u32>() * 2 * 2 + mem::size_of::<FileMode>() + mem::size_of::<u64>()
+    }
+
     fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
         let created = CacheTime::read(&mut *reader)?;
         let modified = CacheTime::read(&mut *reader)?;
@@ -191,38 +187,75 @@ impl FileStat {
 }
 
 struct CacheEntry {
-    stat: FileStat,
+    stats: FileStats,
     sha256: [u8; SHA256_OUTPUT_LEN],
-    name: OsString,
+    name: String,
 }
 
 impl CacheEntry {
-    /// The size of a cache entry when serialized to the disk in the most obvious way.
-    pub fn ce_size(&self) -> usize {
-        mem::size_of::<FileStat>() +    /* file stats with default memory layout */
-        SHA256_OUTPUT_LEN +             /* SHA256 */
-        mem::size_of::<usize>() +       /* length of file name */
-        self.name.len() +               /* file name */
-        8 /* why? */
+    fn skip<R: Read + Seek>(reader: &mut R) -> Result<u64, Error> {
+        let _ = FileStats::read(&mut *reader)?;
+        reader.seek(SeekFrom::Current(SHA256_OUTPUT_LEN as i64))?;
+        let name_len = u32::read_le(&mut *reader)?;
+        reader.seek(SeekFrom::Current(name_len as i64))?;
+        Ok((FileStats::on_disk_size() + SHA256_OUTPUT_LEN + name_len as usize) as u64)
+    }
+
+    fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let stats = FileStats::read(&mut *reader)?;
+        let mut sha256 = [0u8; SHA256_OUTPUT_LEN];
+        reader.read_exact(&mut sha256)?;
+
+        let len = u32::read_le(&mut *reader)?;
+        let mut name = String::with_capacity(len as usize);
+        reader.take(len as u64).read_to_string(&mut name)?;
+
+        Ok(Self {
+            stats,
+            sha256,
+            name,
+        })
     }
 }
 
 /// A directory cache.
 pub struct DirCache {
     // all global variables go in here
+    active_cache: Vec<u64>,
+    reader: BufReader<File>,
 }
 
 impl DirCache {
     /// Initialize the cache information.
     pub fn read_cache() -> Result<Self, Error> {
-        let dir =
-            env::var_os(DB_ENVIRONMENT).unwrap_or_else(|| OsString::from(DEFAULT_DB_ENVIRONMENT));
+        let dir = env::var(DB_ENVIRONMENT).unwrap_or_else(|_| DEFAULT_DB_ENVIRONMENT.to_string());
+        let path = Path::new(&dir);
+        // there's no way to check permission to a dir, try read from it and return whatever error
+        // the read operation returns
+        fs::read_dir(path)?;
 
-        unimplemented!()
+        let mut fd = BufReader::new(File::open(".dircache/index")?);
+        let size = fd.get_ref().metadata()?.len();
+        let header = CacheHeader::read_and_verify(&mut fd, size)?;
+
+        let mut pos = CacheHeader::on_disk_size() as u64;
+        fd.seek(SeekFrom::Start(pos))?;
+        let mut active_cache = Vec::with_capacity(header.entries);
+
+        for _ in 0..header.entries {
+            let skip = CacheEntry::skip(&mut fd)?;
+            active_cache.push(pos);
+            pos += skip;
+        }
+
+        Ok(Self {
+            active_cache,
+            reader: fd,
+        })
     }
 
     /// Return a statically allocated filename matching the sha1 signature.
-    pub fn sha_file_name(&self, sha: &[u8; SHA256_OUTPUT_LEN]) -> OsString {
+    pub fn sha_file_name(&self, sha: &[u8; SHA256_OUTPUT_LEN]) -> String {
         unimplemented!()
     }
 }

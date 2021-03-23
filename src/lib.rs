@@ -59,3 +59,15 @@ macro_rules! impl_read_write_le {
 
 impl_read_write_le!(u32);
 impl_read_write_le!(u64);
+
+#[cfg(test)]
+mod tests {
+    use std::mem;
+
+    #[test]
+    fn compatible_platform() {
+        // so all casts in the library is safe
+        assert!(mem::size_of::<u32>() <= mem::size_of::<usize>());
+        assert!(mem::size_of::<usize>() <= mem::size_of::<u64>());
+    }
+}
