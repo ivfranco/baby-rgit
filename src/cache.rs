@@ -1,10 +1,11 @@
 use bitflags::bitflags;
+use flate2::{write::ZlibEncoder, Compression};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     convert::TryFrom,
     env,
-    fs::{self, File, FileType},
+    fs::{self, File, FileType, OpenOptions},
     io::{BufReader, ErrorKind, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, SystemTimeError},
@@ -160,14 +161,15 @@ pub struct DirCache {
 }
 
 impl DirCache {
-    fn new(db_environment: PathBuf) -> Self {
+    /// Initialize an empty cache.
+    pub fn new(db_environment: PathBuf) -> Self {
         Self {
             active_cache: HashMap::new(),
             db_environment,
         }
     }
 
-    /// Initialize the cache information.
+    /// Initialize the cache information from index file.
     pub fn read_cache() -> Result<Self, Error> {
         let var = env::var(DB_ENVIRONMENT).unwrap_or_else(|_| DEFAULT_DB_ENVIRONMENT.to_string());
         let db_environment = PathBuf::from(var);
@@ -217,22 +219,22 @@ impl DirCache {
     }
 
     /// Get an entry by file name.
-    pub(crate) fn get(&self, name: &str) -> Option<&CacheEntry> {
+    fn get(&self, name: &str) -> Option<&CacheEntry> {
         self.active_cache.get(name)
     }
 
     /// Insert an entry into the directory cache.
-    pub(crate) fn insert(&mut self, entry: CacheEntry) {
+    fn insert(&mut self, entry: CacheEntry) {
         self.active_cache.insert(entry.name.clone(), entry);
     }
 
-    pub(crate) fn remove(&mut self, name: &str) {
+    fn remove(&mut self, name: &str) {
         self.active_cache.remove(name);
     }
 
     /// Add a file to the cache.
     pub fn add_file(&mut self, path: &str) -> Result<(), Error> {
-        let mut fd = match File::open(path) {
+        let fd = match File::open(path) {
             Ok(fd) => fd,
             Err(e) => {
                 if e.kind() == ErrorKind::NotFound {
@@ -255,7 +257,7 @@ impl DirCache {
             size,
         };
 
-        let sha256 = self.index_file(path, fd)?;
+        let sha256 = self.index_file(path, fd, &stats)?;
 
         let entry = CacheEntry {
             stats,
@@ -268,8 +270,40 @@ impl DirCache {
         Ok(())
     }
 
-    fn index_file(&self, path: &str, fd: File) -> Result<SHA256Output, Error> {
-        unimplemented!()
+    fn index_file(&self, path: &str, fd: File, stats: &FileStats) -> Result<SHA256Output, Error> {
+        let buf = Vec::with_capacity(path.len() + stats.size as usize + 200);
+        let mut reader = BufReader::new(fd);
+        let mut writer = ZlibEncoder::new(buf, Compression::best());
+
+        write!(&mut writer, "blob {}", stats.size)?;
+        io::copy(&mut reader, &mut writer)?;
+        let buf = writer.finish()?;
+
+        let sha256: SHA256Output = Sha256::digest(&buf).into();
+        self.write_sha256_buffer(&sha256, &buf)?;
+
+        Ok(sha256)
+    }
+
+    fn write_sha256_buffer(&self, sha256: &SHA256Output, buf: &[u8]) -> Result<(), Error> {
+        let path = self.db_environment.join(sha256_to_hex(sha256));
+
+        let mut fd = match OpenOptions::new().create_new(true).open(path) {
+            Ok(fd) => fd,
+            Err(e) => {
+                if e.kind() == ErrorKind::AlreadyExists {
+                    // if the object exists, by SHA256 it must has the same content as `buf`
+                    return Ok(());
+                } else {
+                    return Err(From::from(e));
+                }
+            }
+        };
+
+        fd.write_all(buf)?;
+        fd.flush()?;
+
+        Ok(())
     }
 }
 

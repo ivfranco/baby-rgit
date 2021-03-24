@@ -5,7 +5,10 @@
 /// A directory cache.
 pub mod cache;
 
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    io::Write,
+};
 
 /// The error type for directory database operations.
 #[derive(thiserror::Error)]
@@ -34,17 +37,5 @@ pub enum Error {
 impl Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Self as Display>::fmt(self, f)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::mem;
-
-    #[test]
-    fn compatible_platform() {
-        // so all casts in the library is safe
-        assert!(mem::size_of::<u32>() <= mem::size_of::<usize>());
-        assert!(mem::size_of::<usize>() <= mem::size_of::<u64>());
     }
 }
