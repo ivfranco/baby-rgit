@@ -6,7 +6,7 @@ use std::{
     convert::TryFrom,
     env,
     fs::{self, File, FileType, OpenOptions},
-    io::{BufReader, ErrorKind, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, ErrorKind, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, SystemTimeError},
 };
@@ -20,8 +20,9 @@ use std::io::{self, Read};
 pub const DB_ENVIRONMENT: &str = "SHA256_FILE_DIRECTORY";
 
 /// Default value of [DB_ENVIRONMENT](DB_ENVIRONMENT).
-pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache/objects";
-const DEFAULT_INDEX_LOCATION: &str = ".dircache/index";
+pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache";
+const INDEX_LOCATION: &str = "index";
+const OBJECT_STORE_LOCATION: &str = "objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
 type SHA256Output = [u8; SHA256_OUTPUT_LEN];
@@ -53,11 +54,11 @@ impl CacheHeader {
         if header.signature != CACHE_SIGNATURE {
             eprintln!("{:08x}", header.signature);
             eprintln!("{:08x}", CACHE_SIGNATURE);
-            return Err(Error::CorruptedHeader("bad signature"));
+            return Err(Error::CorruptedIndex("bad signature"));
         }
 
         if header.version != CACHE_VERSION {
-            return Err(Error::CorruptedHeader("bad version"));
+            return Err(Error::CorruptedIndex("bad version"));
         }
 
         let mut sha256 = SHA256Output::default();
@@ -71,7 +72,7 @@ impl CacheHeader {
         )?;
 
         if hasher.finalize().as_slice() != sha256 {
-            return Err(Error::CorruptedHeader("wrong sha256 signature"));
+            return Err(Error::CorruptedIndex("wrong sha256 signature"));
         }
 
         Ok(header)
@@ -175,9 +176,9 @@ impl DirCache {
         let db_environment = PathBuf::from(var);
         // there's no way to check permission to a dir, instead try read its contents and return
         // whatever error the read operation returns
-        fs::read_dir(&db_environment)?;
+        fs::read_dir(db_environment.join(OBJECT_STORE_LOCATION))?;
 
-        let mut fd = BufReader::new(File::open(DEFAULT_INDEX_LOCATION)?);
+        let mut fd = BufReader::new(File::open(db_environment.join(INDEX_LOCATION))?);
         let size = fd.get_ref().metadata()?.len();
         let header = CacheHeader::read_and_verify(&mut fd, size)?;
 
@@ -197,8 +198,8 @@ impl DirCache {
         })
     }
 
-    /// Write out cache to persistent storage.
-    pub fn write_cache<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
+    /// Write out cache to persistent index file.
+    pub fn write_cache(&self) -> Result<(), Error> {
         let header = CacheHeader::new(self.active_cache.len());
 
         let mut hasher = Sha256::new();
@@ -208,10 +209,16 @@ impl DirCache {
         }
         let sha256: SHA256Output = hasher.finalize().into();
 
-        serialize_into(&mut *writer, &header)?;
+        let fd = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(self.db_environment.join(INDEX_LOCATION))?;
+        let mut writer = BufWriter::new(fd);
+
+        serialize_into(&mut writer, &header)?;
         writer.write_all(&sha256)?;
         for entry in self.active_cache.values() {
-            serialize_into(&mut *writer, entry)?;
+            serialize_into(&mut writer, entry)?;
         }
 
         writer.flush()?;
@@ -271,7 +278,7 @@ impl DirCache {
     }
 
     fn index_file(&self, path: &str, fd: File, stats: &FileStats) -> Result<SHA256Output, Error> {
-        let buf = Vec::with_capacity(path.len() + stats.size as usize + 200);
+        let buf = Vec::with_capacity(path.len() /* why? */ + stats.size as usize + 200);
         let mut reader = BufReader::new(fd);
         let mut writer = ZlibEncoder::new(buf, Compression::best());
 
@@ -279,7 +286,7 @@ impl DirCache {
         io::copy(&mut reader, &mut writer)?;
         let buf = writer.finish()?;
 
-        let sha256: SHA256Output = Sha256::digest(&buf).into();
+        let sha256 = Sha256::digest(&buf).into();
         self.write_sha256_buffer(&sha256, &buf)?;
 
         Ok(sha256)
@@ -304,6 +311,16 @@ impl DirCache {
         fd.flush()?;
 
         Ok(())
+    }
+
+    fn write_sha256_file(&self, buf: &[u8]) -> Result<(), Error> {
+        let mut writer = ZlibEncoder::new(Vec::new(), Compression::best());
+        writer.write_all(buf)?;
+        let compressed = writer.finish()?;
+
+        let sha256 = Sha256::digest(&compressed).into();
+
+        self.write_sha256_buffer(&sha256, &compressed)
     }
 }
 
@@ -405,12 +422,9 @@ mod tests {
             cache.insert(rng.gen());
         }
 
-        fs::create_dir(".dircache").unwrap();
         fs::create_dir(DEFAULT_DB_ENVIRONMENT).unwrap();
-        let mut file = File::create(DEFAULT_INDEX_LOCATION).unwrap();
-        cache.write_cache(&mut file).unwrap();
-
-        drop(file);
+        fs::create_dir(Path::new(DEFAULT_DB_ENVIRONMENT).join(OBJECT_STORE_LOCATION)).unwrap();
+        cache.write_cache().unwrap();
 
         let dir_cache = DirCache::read_cache().unwrap();
         assert_eq!(cache.active_cache, dir_cache.active_cache);

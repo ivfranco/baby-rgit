@@ -17,9 +17,9 @@ pub enum Error {
     #[error("File system: {0}")]
     FS(#[from] std::io::Error),
 
-    /// Header file corrupted.
+    /// Index file corrupted.
     #[error("Header corrupted: {0}")]
-    CorruptedHeader(&'static str),
+    CorruptedIndex(&'static str),
 
     /// Cache entry corrupted.
     #[error("Entry corrupted: {0}")]
