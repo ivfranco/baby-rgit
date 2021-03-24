@@ -30,18 +30,19 @@ impl Debug for Error {
     }
 }
 
-/// Helper trait to read and write primitive number types.
-pub(crate) trait ReadWriteLE: Sized {
-    /// Read the number in little-endian order.
+pub(crate) trait ReadLE: Sized {
+    /// Read the type in little-endian order.
     fn read_le<R: Read>(reader: R) -> io::Result<Self>;
+}
 
-    /// Write the number in little-endian order.
-    fn write_le<W: Write>(self, writer: W) -> io::Result<()>;
+pub(crate) trait WriteLE {
+    /// Write the type in little-endian order.
+    fn write_le<W: Write>(&self, writer: W) -> io::Result<()>;
 }
 
 macro_rules! impl_read_write_le {
     ($ty: ty) => {
-        impl ReadWriteLE for $ty {
+        impl ReadLE for $ty {
             fn read_le<R: std::io::Read>(mut reader: R) -> io::Result<Self> {
                 use std::mem;
 
@@ -49,8 +50,10 @@ macro_rules! impl_read_write_le {
                 reader.read_exact(&mut buf)?;
                 Ok(Self::from_le_bytes(buf))
             }
+        }
 
-            fn write_le<W: std::io::Write>(self, mut writer: W) -> io::Result<()> {
+        impl WriteLE for $ty {
+            fn write_le<W: std::io::Write>(&self, mut writer: W) -> io::Result<()> {
                 writer.write_all(&self.to_le_bytes())
             }
         }

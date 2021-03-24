@@ -1,62 +1,51 @@
 use bitflags::bitflags;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     convert::TryFrom,
     env,
     fs::{self, File, FileType},
-    io::{BufRead, BufReader, Cursor, Seek, SeekFrom},
+    io::{BufReader, Cursor, Seek, SeekFrom},
     mem,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, SystemTimeError},
 };
 
-use crate::{Error, ReadWriteLE};
+use crate::{Error, ReadLE, WriteLE};
 use std::io::{self, Read};
 
 /// Name of the environment variable containing the path to the directory cache.
-pub const DB_ENVIRONMENT: &str = "SHA_FILE_DIRECTORY";
+pub const DB_ENVIRONMENT: &str = "SHA256_FILE_DIRECTORY";
 
 /// Default value of [DB_ENVIRONMENT](DB_ENVIRONMENT).
 pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache/objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
+type SHA256Output = [u8; SHA256_OUTPUT_LEN];
 const CACHE_SIGNATURE: u32 = u32::from_be_bytes(*b"DIRC");
 const CACHE_VERSION: u32 = 1;
-
-fn digest_buffered<D: Digest, R: BufRead>(hasher: &mut D, mut reader: R) -> io::Result<()> {
-    loop {
-        let buf = reader.fill_buf()?;
-        if buf.is_empty() {
-            break;
-        }
-
-        hasher.update(buf);
-    }
-
-    Ok(())
-}
 
 struct CacheHeader {
     signature: u32,
     version: u32,
     entries: usize,
     // sha1 has been deprecated
-    sha256: [u8; SHA256_OUTPUT_LEN],
+    sha256: SHA256Output,
 }
 
 impl CacheHeader {
-    const fn on_disk_size_without_sha() -> usize {
+    const fn on_disk_size_without_sha256() -> usize {
         mem::size_of::<u32>() * 3
     }
 
     const fn on_disk_size() -> usize {
-        Self::on_disk_size() + SHA256_OUTPUT_LEN
+        Self::on_disk_size_without_sha256() + SHA256_OUTPUT_LEN
     }
 
-    fn read_and_verify<R: BufRead>(reader: &mut R, size: u64) -> Result<Self, Error> {
+    fn read_and_verify<R: Read>(reader: &mut R, size: u64) -> Result<Self, Error> {
         // there's no mmap in safe Rust, we cannot use it anyway as Rust does not guarantee memory
         // layout of structs, wonder how different would the performance be
-        let mut buf = [0u8; Self::on_disk_size_without_sha()];
+        let mut buf = [0u8; Self::on_disk_size_without_sha256()];
         reader.read_exact(&mut buf)?;
         let mut cursor = Cursor::new(&buf);
 
@@ -72,12 +61,15 @@ impl CacheHeader {
 
         let entries = u32::read_le(&mut cursor)? as usize;
 
-        let mut sha256 = [0u8; SHA256_OUTPUT_LEN];
+        let mut sha256 = SHA256Output::default();
         reader.read_exact(&mut sha256)?;
 
         let mut hasher = Sha256::new();
         hasher.update(&buf);
-        digest_buffered(&mut hasher, reader.take(size - Self::on_disk_size() as u64))?;
+        io::copy(
+            &mut reader.take(size - Self::on_disk_size() as u64),
+            &mut hasher,
+        )?;
 
         if hasher.finalize().as_slice() != sha256 {
             return Err(Error::CorruptedHeader("wrong sha256 signature"));
@@ -89,6 +81,16 @@ impl CacheHeader {
             entries,
             sha256,
         })
+    }
+}
+
+impl WriteLE for CacheHeader {
+    fn write_le<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
+        self.signature.write_le(&mut writer)?;
+        self.version.write_le(&mut writer)?;
+        (self.entries as u32).write_le(&mut writer)?;
+        writer.write_all(&self.sha256)?;
+        Ok(())
     }
 }
 
@@ -188,7 +190,7 @@ impl FileStats {
 
 struct CacheEntry {
     stats: FileStats,
-    sha256: [u8; SHA256_OUTPUT_LEN],
+    sha256: SHA256Output,
     name: String,
 }
 
@@ -203,7 +205,7 @@ impl CacheEntry {
 
     fn read<R: Read>(reader: &mut R) -> Result<Self, Error> {
         let stats = FileStats::read(&mut *reader)?;
-        let mut sha256 = [0u8; SHA256_OUTPUT_LEN];
+        let mut sha256 = SHA256Output::default();
         reader.read_exact(&mut sha256)?;
 
         let len = u32::read_le(&mut *reader)?;
@@ -218,44 +220,75 @@ impl CacheEntry {
     }
 }
 
-/// A directory cache.
+/// A directory cache. All global variables go in here.
 pub struct DirCache {
-    // all global variables go in here
-    active_cache: Vec<u64>,
-    reader: BufReader<File>,
+    /// The C implementation used a memory mapped sorted array, construction and search was fast but
+    /// remove and insert is O(n), as there's no mmap in Rust maybe HashMap is the right way to go.
+    active_cache: HashMap<String, CacheEntry>,
+    db_environment: PathBuf,
 }
 
 impl DirCache {
     /// Initialize the cache information.
     pub fn read_cache() -> Result<Self, Error> {
-        let dir = env::var(DB_ENVIRONMENT).unwrap_or_else(|_| DEFAULT_DB_ENVIRONMENT.to_string());
-        let path = Path::new(&dir);
-        // there's no way to check permission to a dir, try read from it and return whatever error
-        // the read operation returns
-        fs::read_dir(path)?;
+        let var = env::var(DB_ENVIRONMENT).unwrap_or_else(|_| DEFAULT_DB_ENVIRONMENT.to_string());
+        let db_environment = PathBuf::from(var);
+        // there's no way to check permission to a dir, instead try read its contents and return
+        // whatever error the read operation returns
+        fs::read_dir(&db_environment)?;
 
         let mut fd = BufReader::new(File::open(".dircache/index")?);
         let size = fd.get_ref().metadata()?.len();
         let header = CacheHeader::read_and_verify(&mut fd, size)?;
 
-        let mut pos = CacheHeader::on_disk_size() as u64;
-        fd.seek(SeekFrom::Start(pos))?;
-        let mut active_cache = Vec::with_capacity(header.entries);
+        let entry_start = CacheHeader::on_disk_size() as u64;
+        fd.seek(SeekFrom::Start(entry_start))?;
+
+        let mut active_cache = HashMap::with_capacity(header.entries);
 
         for _ in 0..header.entries {
-            let skip = CacheEntry::skip(&mut fd)?;
-            active_cache.push(pos);
-            pos += skip;
+            let entry = CacheEntry::read(&mut fd)?;
+            active_cache.insert(entry.name.clone(), entry);
         }
 
         Ok(Self {
             active_cache,
-            reader: fd,
+            db_environment,
         })
     }
+}
 
-    /// Return a statically allocated filename matching the sha1 signature.
-    pub fn sha_file_name(&self, sha: &[u8; SHA256_OUTPUT_LEN]) -> String {
-        unimplemented!()
+fn sha256_to_hex(sha256: &SHA256Output) -> String {
+    use std::fmt::Write;
+
+    let mut name = String::new();
+    for &byte in sha256 {
+        write!(&mut name, "{:02x}", byte).unwrap();
+    }
+    name
+}
+
+fn hexval(char: u8) -> Option<u8> {
+    match char {
+        b'0'..=b'9' => Some(char - b'0'),
+        b'a'..=b'f' => Some(char - b'a' + 10),
+        _ => None,
     }
 }
+
+fn hex_to_sha256(hex: &str) -> Option<SHA256Output> {
+    let bytes = hex.as_bytes();
+    assert_eq!(bytes.len(), 64);
+
+    let mut sha256 = SHA256Output::default();
+
+    for i in 0..SHA256_OUTPUT_LEN {
+        sha256[i] = hexval(bytes[2 * i])? << 4;
+        sha256[i] |= hexval(bytes[2 * i + 1])?;
+    }
+
+    Some(sha256)
+}
+
+#[cfg(test)]
+mod tests {}

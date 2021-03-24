@@ -8,5 +8,3 @@
 # Plans
 
 - Safe Rust as much as possible.
-- The original C implementation is not thread safe, could be addressed at a later stage. A lock file
-  like cargo may suffice.
