@@ -5,10 +5,7 @@
 /// A directory cache.
 pub mod cache;
 
-use std::{
-    fmt::{Debug, Display},
-    io::Write,
-};
+use std::fmt::{Debug, Display};
 
 /// The error type for directory database operations.
 #[derive(thiserror::Error)]
@@ -32,6 +29,14 @@ pub enum Error {
     /// System time before Unix epoch.
     #[error("System time before UNIX epoch")]
     Time(#[from] std::time::SystemTimeError),
+
+    /// Object file corrupted.
+    #[error("Object file corrupted: {0}")]
+    CorruptedObject(&'static str),
+
+    /// Integer overflow errors.
+    #[error("Integer overflow: {0}")]
+    Overflow(&'static str),
 }
 
 impl Debug for Error {
