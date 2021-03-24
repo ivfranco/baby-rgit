@@ -6,13 +6,12 @@
 pub mod cache;
 
 use std::fmt::{Debug, Display};
-use std::io::{self, Read, Write};
 
 /// The error type for directory database operations.
 #[derive(thiserror::Error)]
 pub enum Error {
     /// IO errors from the underlying file system.
-    #[error("{0}")]
+    #[error("File system: {0}")]
     FS(#[from] std::io::Error),
 
     /// Header file corrupted.
@@ -22,6 +21,14 @@ pub enum Error {
     /// Cache entry corrupted.
     #[error("Entry corrupted: {0}")]
     CorruptedEntry(&'static str),
+
+    /// Bincode (de)serialize error.
+    #[error("Bincode: {0}")]
+    Bincode(#[from] bincode::Error),
+
+    /// System time before Unix epoch.
+    #[error("System time before UNIX epoch")]
+    Time(#[from] std::time::SystemTimeError),
 }
 
 impl Debug for Error {
@@ -29,39 +36,6 @@ impl Debug for Error {
         <Self as Display>::fmt(self, f)
     }
 }
-
-pub(crate) trait ReadLE: Sized {
-    /// Read the type in little-endian order.
-    fn read_le<R: Read>(reader: R) -> io::Result<Self>;
-}
-
-pub(crate) trait WriteLE {
-    /// Write the type in little-endian order.
-    fn write_le<W: Write>(&self, writer: W) -> io::Result<()>;
-}
-
-macro_rules! impl_read_write_le {
-    ($ty: ty) => {
-        impl ReadLE for $ty {
-            fn read_le<R: std::io::Read>(mut reader: R) -> io::Result<Self> {
-                use std::mem;
-
-                let mut buf = [0u8; mem::size_of::<$ty>()];
-                reader.read_exact(&mut buf)?;
-                Ok(Self::from_le_bytes(buf))
-            }
-        }
-
-        impl WriteLE for $ty {
-            fn write_le<W: std::io::Write>(&self, mut writer: W) -> io::Result<()> {
-                writer.write_all(&self.to_le_bytes())
-            }
-        }
-    };
-}
-
-impl_read_write_le!(u32);
-impl_read_write_le!(u64);
 
 #[cfg(test)]
 mod tests {
