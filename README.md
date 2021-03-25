@@ -16,17 +16,18 @@ A Rust clone of the very first commit of git.
 
 # Progress
 
-- [ ] Methods of directory cache:
+- [x] Methods of directory cache:
+  - [x] init
   - [x] read_cache
   - [x] write_cache
   - [x] read_sha1_file
   - [x] write_sha1_file
-  - [ ] check_valid_sha1
+  - [x] check_valid_sha1
 - [ ] Binaries
-  - [ ] init-db
+  - [x] init-db
   - [ ] write-tree
   - [ ] read-tree
-  - [ ] update-cache
+  - [x] update-cache
   - [ ] commit-tree
   - [ ] show-diff
   - [ ] cat-file

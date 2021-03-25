@@ -7,9 +7,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     convert::TryFrom,
-    env,
     fs::{self, File, FileType, OpenOptions},
-    io::{self, BufReader, BufWriter, Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::from_utf8,
     time::{SystemTime, SystemTimeError},
@@ -18,11 +17,14 @@ use std::{
 use crate::Error;
 
 /// Name of the environment variable containing the path to the directory cache.
-pub const DB_ENVIRONMENT: &str = "SHA256_FILE_DIRECTORY";
+pub const DB_ENVIRONMENT: &str = "DB_ENVIRONMENT";
 
 /// Default value of [DB_ENVIRONMENT](DB_ENVIRONMENT).
 pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache";
-const INDEX_LOCATION: &str = "index";
+
+/// Location of cache index file under cache directory.
+pub const INDEX_LOCATION: &str = "index";
+
 const OBJECT_STORE_LOCATION: &str = "objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
@@ -171,23 +173,12 @@ struct ObjectHeader {
     size: u64,
 }
 
-const fn u64_max_len() -> usize {
-    "18446744073709551615".len()
-}
-
 impl ObjectHeader {
     fn write<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-        // provides a little bit more robustness to the SHA256 hash against non-adversarial
-        // collisions
+        // serializing the header in ASCII provides a little bit more robustness to the SHA256 hash
+        // against non-adversarial collisions, meaningless once it's busted like SHA1
         serialize_into(&mut *writer, self.ty.tag())?;
-
-        let mut buf = [0u8; u64_max_len()];
-        let mut cursor = Cursor::new(&mut buf[..]);
-        write!(&mut cursor, "{}", self.size).unwrap();
-        let pos = cursor.position() as usize;
-        let decimal = from_utf8(&buf[..pos]).unwrap();
-
-        serialize_into(&mut *writer, decimal)?;
+        serialize_into(&mut *writer, &format!("{}", self.size))?;
 
         Ok(())
     }
@@ -208,6 +199,8 @@ impl ObjectHeader {
     }
 }
 
+struct TreeObject {}
+
 /// A directory cache. All global variables go in here.
 /// # On Disk Structure:
 ///
@@ -217,20 +210,44 @@ impl ObjectHeader {
 pub struct DirCache {
     /// The C implementation used a memory mapped sorted array, construction and search was fast but
     /// remove and insert is O(n), as there's no mmap in Rust maybe HashMap is the right way to go.
-    active_cache: HashMap<String, CacheEntry>,
     db_environment: PathBuf,
+    active_cache: HashMap<String, CacheEntry>,
 }
 
 impl DirCache {
-    /// Initialize an empty cache.
-    pub fn new(db_environment: PathBuf) -> Self {
-        Self {
-            active_cache: HashMap::new(),
-            db_environment,
+    /// # C counterpart:
+    /// extracted from init-db.c
+    pub fn init<P: AsRef<Path>>(db_environment: P) -> Result<Self, Error> {
+        fn ignore_exist(e: io::Error) -> Result<(), io::Error> {
+            if e.kind() == ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
         }
+
+        let db_environment = db_environment.as_ref().to_path_buf();
+
+        fs::create_dir(&db_environment).or_else(ignore_exist)?;
+
+        let obj_store = db_environment.join(OBJECT_STORE_LOCATION);
+        fs::create_dir(&obj_store).or_else(ignore_exist)?;
+
+        for byte in 0..=255u8 {
+            let sub = byte_to_hex(byte);
+            fs::create_dir(obj_store.join(from_utf8(&sub).unwrap())).or_else(ignore_exist)?;
+        }
+
+        Ok(Self {
+            db_environment,
+            active_cache: HashMap::new(),
+        })
     }
 
     /// Initialize the cache information from index file.
+    ///
+    /// # C counterpart:
+    /// read-cache.c#read_cache
     pub fn read_cache<P: AsRef<Path>>(db_environment: P) -> Result<Self, Error> {
         let db_environment = db_environment.as_ref().to_path_buf();
         // there's no way to check permission to a dir, instead try read its contents and return
@@ -258,7 +275,10 @@ impl DirCache {
     }
 
     /// Write out cache to persistent index file.
-    pub fn write_cache(&self) -> Result<(), Error> {
+    ///
+    /// # C counterpart:
+    /// update-cache.c#write_cache
+    pub fn write_index(&self, file: &File) -> Result<(), Error> {
         let header = CacheHeader::new(self.active_cache.len());
 
         let mut hasher = Sha256::new();
@@ -268,11 +288,7 @@ impl DirCache {
         }
         let sha256: SHA256Output = hasher.finalize().into();
 
-        let fd = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(self.db_environment.join(INDEX_LOCATION))?;
-        let mut writer = BufWriter::new(fd);
+        let mut writer = BufWriter::new(file);
 
         serialize_into(&mut writer, &header)?;
         writer.write_all(&sha256)?;
@@ -281,10 +297,10 @@ impl DirCache {
         }
 
         writer.flush()?;
+
         Ok(())
     }
 
-    /// Get an entry by file name.
     fn get(&self, name: &str) -> Option<&CacheEntry> {
         self.active_cache.get(name)
     }
@@ -298,7 +314,10 @@ impl DirCache {
         self.active_cache.remove(name);
     }
 
-    /// Add a file to the cache.
+    /// Add a file to the cache, return the SHA256 hash of the compressed data on disk.
+    ///
+    /// # C countpart:
+    /// update-cache.c#add_file_to_cache
     pub fn add_file(&mut self, path: &str) -> Result<SHA256Output, Error> {
         let fd = match File::open(path) {
             Ok(fd) => fd,
@@ -342,7 +361,8 @@ impl DirCache {
     }
 
     fn write_sha256_buffer(&self, sha256: &SHA256Output, buf: &[u8]) -> Result<(), Error> {
-        let path = self.db_environment.join(sha256_to_hex(sha256));
+        eprintln!("breakpoint");
+        let path = sha256_file_name(&self.db_environment, sha256);
 
         let mut fd = match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(fd) => fd,
@@ -363,8 +383,11 @@ impl DirCache {
     }
 
     /// Read a sha256 indexed file from the object store.
+    ///
+    /// # C counterpart:
+    /// read-cache.c#read_sha1_file
     pub fn read_sha256_file(&self, sha256: &SHA256Output) -> Result<(ObjectType, Vec<u8>), Error> {
-        let path = self.db_environment.join(sha256_to_hex(sha256));
+        let path = sha256_file_name(&self.db_environment, sha256);
         let fd = File::open(path)?;
         let mut reader = ZlibDecoder::new(BufReader::new(fd));
 
@@ -379,6 +402,9 @@ impl DirCache {
     }
 
     /// Write a buffer to sha256 indexed file in object store.
+    ///
+    /// # C counterpart:
+    /// read-cache.c#write_sha1_file
     pub fn write_sha256_file<R>(
         &self,
         ty: ObjectType,
@@ -400,16 +426,62 @@ impl DirCache {
 
         Ok(sha256)
     }
+
+    /// Check the existence, accessibility and SHA256 signature of an object file without reading its
+    /// entirety into memory.
+    ///
+    /// # C counterpart:
+    /// write-tree.c#check_valid_sha1
+    pub fn check_sha256_inplace(&self, sha256: &SHA256Output) -> Result<(), Error> {
+        let path = sha256_file_name(&self.db_environment, sha256);
+        let fd = File::open(path)?;
+        let mut reader = BufReader::new(fd);
+
+        let mut hasher = Sha256::new();
+        io::copy(&mut reader, &mut hasher)?;
+        let hash: SHA256Output = hasher.finalize().into();
+
+        if sha256 == &hash {
+            Ok(())
+        } else {
+            Err(Error::CorruptedObject("SHA256 mismatch"))
+        }
+    }
 }
 
-fn sha256_to_hex(sha256: &SHA256Output) -> String {
-    use std::fmt::Write;
-
-    let mut name = String::new();
-    for &byte in sha256 {
-        write!(&mut name, "{:02x}", byte).unwrap();
+fn valhex(byte: u8) -> Option<u8> {
+    match byte {
+        0..=9 => Some(b'0' + byte),
+        10..=15 => Some(b'a' + byte - 10),
+        _ => None,
     }
-    name
+}
+
+fn byte_to_hex(byte: u8) -> [u8; 2] {
+    let h = byte >> 4;
+    let l = byte & 0b1111;
+
+    [valhex(h).unwrap(), valhex(l).unwrap()]
+}
+
+// <$path>/objects/<first two digits of SHA256>/<rest digits of sha256>
+fn sha256_file_name(path: &Path, sha256: &SHA256Output) -> PathBuf {
+    let mut buf = path.join(OBJECT_STORE_LOCATION);
+
+    let first_two_digits = byte_to_hex(sha256[0]);
+    buf.push(from_utf8(&first_two_digits).unwrap());
+
+    let mut rest_digits = [0u8; SHA256_OUTPUT_LEN * 2 - 2];
+
+    for (i, &byte) in sha256.iter().skip(1).enumerate() {
+        let [h, l] = byte_to_hex(byte);
+        rest_digits[2 * i] = h;
+        rest_digits[2 * i + 1] = l;
+    }
+
+    buf.push(from_utf8(&rest_digits).unwrap());
+
+    buf
 }
 
 fn hexval(char: u8) -> Option<u8> {
@@ -436,8 +508,6 @@ fn hex_to_sha256(hex: &str) -> Option<SHA256Output> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use rand::{
         distributions::{Alphanumeric, Standard},
@@ -508,26 +578,10 @@ mod tests {
         }
     }
 
-    fn test_env() -> (TempDir, DirCache) {
-        let dir = TempDir::new().unwrap();
-        // cwd is process-wide, the temp dir will be shared between multiple test threads
-        // env::set_current_dir(dir.path()).unwrap();
-
-        let path = dir.path();
-        fs::create_dir(path.join(DEFAULT_DB_ENVIRONMENT)).unwrap();
-        fs::create_dir(
-            path.join(DEFAULT_DB_ENVIRONMENT)
-                .join(OBJECT_STORE_LOCATION),
-        )
-        .unwrap();
-        let cache = DirCache::new(path.join(DEFAULT_DB_ENVIRONMENT));
-
-        (dir, cache)
-    }
-
     #[test]
     fn cache_write_read() {
-        let (dir, mut cache) = test_env();
+        let dir = TempDir::new().unwrap();
+        let mut cache = DirCache::init(dir.path().join(DEFAULT_DB_ENVIRONMENT)).unwrap();
 
         let seed: u64 = rand::random();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -536,17 +590,19 @@ mod tests {
             cache.insert(rng.gen());
         }
 
-        cache.write_cache().unwrap();
+        let index = File::create(cache.db_environment.join(INDEX_LOCATION)).unwrap();
+        cache.write_index(&index).unwrap();
 
         let dir_cache = DirCache::read_cache(dir.path().join(DEFAULT_DB_ENVIRONMENT)).unwrap();
         assert_eq!(cache.active_cache, dir_cache.active_cache);
     }
 
     #[test]
-    fn hex_sha256_conversion() {
-        let sha256 = rand::random();
-        let hex = sha256_to_hex(&sha256);
-        assert_eq!(hex_to_sha256(&hex), Some(sha256));
+    fn hex_val_conversion() {
+        for b in 0..=255u8 {
+            let [h, l] = byte_to_hex(b);
+            assert_eq!((hexval(h).unwrap() << 4) + hexval(l).unwrap(), b);
+        }
     }
 
     #[test]
@@ -554,15 +610,17 @@ mod tests {
         let mut buf = vec![];
         let header: ObjectHeader = rand::random();
         header.write(&mut buf).unwrap();
-        from_utf8(&buf).unwrap();
+        // should be safe, length of both strings cannot go beyond the higher half of a byte
+        std::str::from_utf8(&buf).unwrap();
         let de = ObjectHeader::read(&mut buf.as_slice()).unwrap();
 
         assert_eq!(header, de);
     }
 
     #[test]
-    fn sha256_file_write_read() {
-        let (dir, mut cache) = test_env();
+    fn sha256_file_write_check_read() {
+        let dir = TempDir::new().unwrap();
+        let mut cache = DirCache::init(dir.path().join(DEFAULT_DB_ENVIRONMENT)).unwrap();
 
         let mut rng = rand::thread_rng();
         let len = rng.gen_range(0..0x1000);
@@ -573,6 +631,7 @@ mod tests {
         file.flush().unwrap();
 
         let sha256 = cache.add_file(file.path().to_str().unwrap()).unwrap();
+        cache.check_sha256_inplace(&sha256).unwrap();
         let (ty, deflated) = cache.read_sha256_file(&sha256).unwrap();
 
         assert_eq!(ty, ObjectType::Blob);

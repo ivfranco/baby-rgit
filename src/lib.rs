@@ -5,6 +5,9 @@
 /// A directory cache.
 pub mod cache;
 
+/// Command line utilities.
+pub mod cmd;
+
 use std::fmt::{Debug, Display};
 
 /// The error type for directory database operations.
