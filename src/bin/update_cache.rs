@@ -1,8 +1,4 @@
-use std::{
-    fs::OpenOptions,
-    io::BufWriter,
-    path::{Path, PathBuf},
-};
+use std::{fs::OpenOptions, path::PathBuf};
 
 use anyhow::Context;
 use argh::FromArgs;
@@ -28,7 +24,7 @@ fn exec(files: Vec<String>) -> anyhow::Result<()> {
         .open(&path)
         .context("Unable to create new cache file")?;
 
-    let mut cache = DirCache::read_cache(&db_env)?;
+    let mut cache = DirCache::read_index(&db_env)?;
 
     for file in files {
         if !verify_path(&file) {

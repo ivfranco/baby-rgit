@@ -1,13 +1,9 @@
 use std::{
     env::{self, VarError},
     fmt::Display,
-    fs::{File, OpenOptions},
-    io,
     path::Path,
     process,
 };
-
-use anyhow::Context;
 
 use crate::cache::{DB_ENVIRONMENT, DEFAULT_DB_ENVIRONMENT};
 
@@ -19,7 +15,7 @@ pub fn db_environment() -> String {
         Ok(var) => var,
         Err(e) => {
             if let VarError::NotUnicode(var) = e {
-                eprintln!("Non-unicode {}: {:?}", DB_ENVIRONMENT, var);
+                eprintln!("{} is not unicode: {:?}", DB_ENVIRONMENT, var);
             }
             DEFAULT_DB_ENVIRONMENT.to_string()
         }

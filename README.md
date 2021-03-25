@@ -1,6 +1,7 @@
 # baby-rgit
 
-A Rust clone of the very first commit of git.
+A Rust clone of the ~~very first commit of git~~ the first commit cannot unpack directories from
+object files, the first functioning commit is the third one.
 
 # Changes
 
