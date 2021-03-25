@@ -26,8 +26,8 @@ object files, the first functioning commit is the third one.
   - [x] check_valid_sha1
 - [ ] Binaries
   - [x] init-db
-  - [ ] write-tree
-  - [ ] read-tree
+  - [x] write-tree
+  - [x] read-tree
   - [x] update-cache
   - [ ] commit-tree
   - [ ] show-diff

@@ -21,6 +21,11 @@ name = "write_tree"
 test = false
 doctest = false
 
+[[bin]]
+name = "read_tree"
+test = false
+doctest = false
+
 [dependencies]
 sha2 = "0.9.3"
 flate2 = "1.0.20"

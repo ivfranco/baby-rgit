@@ -29,7 +29,9 @@ pub const INDEX_LOCATION: &str = "index";
 const OBJECT_STORE_LOCATION: &str = "objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
-type SHA256Output = [u8; SHA256_OUTPUT_LEN];
+
+/// Output of SHA256 hash algorithm as a fixed-length byte array.
+pub type SHA256Output = [u8; SHA256_OUTPUT_LEN];
 const CACHE_SIGNATURE: u32 = u32::from_be_bytes(*b"DIRC");
 const CACHE_VERSION: u32 = 1;
 
@@ -232,24 +234,66 @@ impl<'a> TreeObject<'a> {
 
         Self { entries }
     }
+
+    fn unpack(&self, db_env: &DBEnv) -> Result<(), Error> {
+        for TreeObjectEntry { name, sha256 } in &self.entries {
+            let mut file = recreate_file(name)?;
+            let (ty, buf) = db_env.read_sha256_file(sha256)?;
+            if ty != ObjectType::Blob {
+                return Err(Error::CorruptedObject("bad object file referred by tree"));
+            }
+            file.write_all(&buf)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn recreate_file(path: &str) -> Result<File, Error> {
+    let fd = match File::create(path) {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            recreate_directories(path)?;
+            File::create(path)?
+        }
+        Err(e) => return Err(From::from(e)),
+    };
+
+    Ok(fd)
+}
+
+fn recreate_directories(path: &str) -> Result<(), Error> {
+    let mut ancestors: Vec<_> = Path::new(path).ancestors().collect();
+    // Path::ancestors is deepest first
+    ancestors.reverse();
+
+    for ancestor in ancestors {
+        if !ancestor.is_dir() {
+            fs::create_dir(ancestor)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Object database environment, should be the only interface to all things in
 /// [DB_ENVIRONMENT](DB_ENVIRONMENT)
 pub struct DBEnv {
-    root: PathBuf,
+    _root: PathBuf,
     cache_index: PathBuf,
     obj_store: PathBuf,
 }
 
 impl DBEnv {
-    fn new<P: AsRef<Path>>(root: P) -> Self {
+    /// Construct an interface to the object database components without checking whether it exists
+    /// on disk.
+    pub fn new<P: AsRef<Path>>(root: P) -> Self {
         let root = root.as_ref().to_path_buf();
 
         Self {
             cache_index: root.join(INDEX_LOCATION),
             obj_store: root.join(OBJECT_STORE_LOCATION),
-            root,
+            _root: root,
         }
     }
 
@@ -277,7 +321,7 @@ impl DBEnv {
         Ok(Self {
             cache_index: root.join(INDEX_LOCATION),
             obj_store: root.join(OBJECT_STORE_LOCATION),
-            root,
+            _root: root,
         })
     }
 
@@ -379,6 +423,24 @@ impl DBEnv {
         } else {
             Err(Error::CorruptedObject("SHA256 mismatch"))
         }
+    }
+
+    /// Unpack a snapshot of cached directory by its sha256 signature, restore all files mentioned
+    /// in the tree object to the captured content.
+    ///
+    /// # C counterpart
+    /// read-tree.c#unpack
+    pub fn unpack(&self, sha256: &SHA256Output) -> Result<(), Error> {
+        let (ty, buf) = self.read_sha256_file(sha256)?;
+
+        if ty != ObjectType::Tree {
+            return Err(Error::CorruptedObject("Expected tree object"));
+        }
+
+        let tree: TreeObject = deserialize(&buf)?;
+        tree.unpack(&self)?;
+
+        Ok(())
     }
 }
 
@@ -513,6 +575,9 @@ impl DirCache {
         Ok(sha256)
     }
 
+    /// Pack the current state of the directory cache into an object file, write it out to the
+    /// object store.
+    ///
     /// # C counterpart
     /// extracted from write-tree.c
     pub fn pack(&self) -> Result<SHA256Output, Error> {
@@ -520,20 +585,6 @@ impl DirCache {
         let buf = serialize(&tree)?;
         self.db_env
             .write_sha256_file(ObjectType::Tree, &mut buf.as_slice(), buf.len() as u64)
-    }
-
-    /// # C counterpart
-    /// read-tree.c#unpack
-    pub fn unpack(&self, sha256: &SHA256Output) -> Result<(), Error> {
-        let (ty, buf) = self.db_env.read_sha256_file(sha256)?;
-
-        if ty != ObjectType::Tree {
-            return Err(Error::CorruptedObject("Expected tree object"));
-        }
-
-        let tree: TreeObject = deserialize(&buf)?;
-
-        Ok(())
     }
 }
 
@@ -552,7 +603,7 @@ fn byte_to_hex(byte: u8) -> [u8; 2] {
     [valhex(h).unwrap(), valhex(l).unwrap()]
 }
 
-// <$path>/objects/<first two digits of SHA256>/<rest digits of sha256>
+// <$path>/<first two digits of SHA256>/<rest digits of sha256>
 fn sha256_file_name(path: &Path, sha256: &SHA256Output) -> PathBuf {
     let mut buf = path.to_path_buf();
 
@@ -580,7 +631,8 @@ fn hexval(char: u8) -> Option<u8> {
     }
 }
 
-fn hex_to_sha256(hex: &str) -> Option<SHA256Output> {
+/// Convert a hex ASCII string to 32-bytes of SHA256 output.
+pub fn hex_to_sha256(hex: &str) -> Option<SHA256Output> {
     let bytes = hex.as_bytes();
     assert_eq!(bytes.len(), 64);
 
