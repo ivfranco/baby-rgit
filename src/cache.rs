@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::BTreeMap,
     convert::TryFrom,
     fs::{self, File, FileType, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
@@ -224,13 +224,11 @@ struct TreeObject<'a> {
 
 impl<'a> TreeObject<'a> {
     fn new(cache: &'a DirCache) -> Self {
-        let mut entries: Vec<_> = cache
+        let entries: Vec<_> = cache
             .active_cache
             .values()
             .map(TreeObjectEntry::new)
             .collect();
-
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         Self { entries }
     }
@@ -454,7 +452,7 @@ pub struct DirCache {
     db_env: DBEnv,
     /// The C implementation used a memory mapped sorted array, construction and search was fast but
     /// remove and insert is O(n), as there's no mmap in Rust maybe HashMap is the right way to go.
-    active_cache: HashMap<String, CacheEntry>,
+    active_cache: BTreeMap<String, CacheEntry>,
 }
 
 impl DirCache {
@@ -464,7 +462,7 @@ impl DirCache {
         let db_environment = DBEnv::init(db_environment)?;
         Ok(Self {
             db_env: db_environment,
-            active_cache: HashMap::new(),
+            active_cache: BTreeMap::new(),
         })
     }
 
@@ -485,7 +483,7 @@ impl DirCache {
         let entry_start = serialized_size(&header)? + SHA256_OUTPUT_LEN as u64;
         fd.seek(SeekFrom::Start(entry_start))?;
 
-        let mut active_cache = HashMap::with_capacity(header.entries);
+        let mut active_cache = BTreeMap::new();
 
         for _ in 0..header.entries {
             let entry: CacheEntry = deserialize_from(&mut fd)?;
