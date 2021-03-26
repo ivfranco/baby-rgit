@@ -474,7 +474,8 @@ impl DBEnv {
 /// 2.  SHA256 of header and entries
 /// 3.  Cache entries { file stats, sha256 of object, file name }
 pub struct DirCache {
-    db_env: DBEnv,
+    /// The object database environment managed by this cache.
+    pub db_env: DBEnv,
     /// The C implementation used a memory mapped sorted array, construction and search was fast but
     /// remove and insert is O(n), as there's no mmap in Rust maybe HashMap is the right way to go.
     active_cache: BTreeMap<String, CacheEntry>,
@@ -614,8 +615,8 @@ impl DirCache {
     /// # C counterpart
     /// extracted from write-tree.c
     pub fn pack(&self) -> Result<SHA256Output, Error> {
-        if self.active_cache.is_empty() {
-            return Err(Error::PackEmptyCache);
+        for entry in self.active_cache.values() {
+            self.db_env.check_sha256_inplace(&entry.sha256)?;
         }
 
         let tree = TreeObject::new(self);
@@ -835,7 +836,7 @@ mod tests {
             cache.insert(rng.gen());
         }
 
-        let sha256 = cache.pack().unwrap();
+        let sha256 = TreeObject::new(&cache).pack(&cache.db_env).unwrap();
         let (ty, buf) = cache.db_env.read_sha256_file(&sha256).unwrap();
         assert_eq!(ty, ObjectType::Tree);
 

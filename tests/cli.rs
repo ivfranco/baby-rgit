@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, TempDir};
 
 use baby_rgit::cache::{
-    DirCache, SHA256Output, DEFAULT_DB_ENVIRONMENT, INDEX_LOCATION, OBJECT_STORE_LOCATION,
+    hex_to_sha256, sha256_to_hex, DirCache, ObjectType, SHA256Output, DEFAULT_DB_ENVIRONMENT,
+    INDEX_LOCATION, OBJECT_STORE_LOCATION,
 };
 use walkdir::{DirEntry, WalkDir};
 
@@ -135,20 +136,13 @@ fn cli_update_cache() {
     assert_eq!(cache.entries(), files as usize);
 }
 
-#[test]
-fn cli_tree_read_write() {
-    let temp = TempDir::new().unwrap();
-    let orig = temp.path().join("orig");
-    fs::create_dir(&orig).unwrap();
+fn random_cache<R: Rng>(rng: &mut R, dir: &Path) -> DirCache {
+    let db_env = dir.join(DEFAULT_DB_ENVIRONMENT);
+    let mut cache = DirCache::init(&db_env).unwrap();
 
-    let db_env = orig.join(DEFAULT_DB_ENVIRONMENT);
-    let _ = DirCache::init(&db_env).unwrap();
+    let _ = random_structure(&mut *rng, &dir);
 
-    let mut rng = rand::thread_rng();
-    let _ = random_structure(&mut rng, &orig);
-
-    let mut cache = DirCache::read_index(&db_env).unwrap();
-    for entry in dir_walker(&orig) {
+    for entry in dir_walker(&dir) {
         let entry = entry.unwrap();
         if entry.path().is_file() {
             cache.add_file(entry.path().to_str().unwrap()).unwrap();
@@ -157,7 +151,17 @@ fn cli_tree_read_write() {
 
     let index = File::create(db_env.join(INDEX_LOCATION)).unwrap();
     cache.write_index(&index).unwrap();
-    drop(index);
+    cache
+}
+
+#[test]
+fn cli_tree_write_read() {
+    let temp = TempDir::new().unwrap();
+    let orig = temp.path().join("orig");
+    fs::create_dir(&orig).unwrap();
+
+    let mut rng = rand::thread_rng();
+    let _ = random_cache(&mut rng, &orig);
 
     let copy = temp.path().join("copy");
 
@@ -199,7 +203,7 @@ fn cli_tree_read_write() {
             continue;
         }
 
-        // unpack doesn't recreate empty directories
+        // unpack will not recreate empty directories
         let orig_entry = loop {
             let orig_entry = orig_walker.next().unwrap().unwrap();
             if orig_entry.path().is_file() {
@@ -210,4 +214,28 @@ fn cli_tree_read_write() {
         assert_eq!(copy_entry.file_name(), orig_entry.file_name());
         assert!(same_file(copy_entry.path(), orig_entry.path()).unwrap());
     }
+}
+
+#[test]
+fn cli_commit_tree() {
+    let temp = TempDir::new().unwrap();
+
+    let mut rng = rand::thread_rng();
+    let cache = random_cache(&mut rng, temp.path());
+
+    let tree_sha256 = cache.pack().unwrap();
+
+    let assert = Command::cargo_bin("commit_tree")
+        .unwrap()
+        .current_dir(&temp)
+        .arg(sha256_to_hex(&tree_sha256))
+        .args(&["-c", "initial commit"])
+        .assert()
+        .success();
+
+    let commit_hex = &assert.get_output().stdout;
+    let commit_sha256 = hex_to_sha256(from_utf8(commit_hex).unwrap()).unwrap();
+
+    let (ty, _) = cache.db_env.read_sha256_file(&commit_sha256).unwrap();
+    assert_eq!(ty, ObjectType::Commit);
 }

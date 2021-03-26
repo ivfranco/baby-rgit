@@ -16,7 +16,7 @@ fn exec(args: CommitTree) -> anyhow::Result<()> {
     let db_env = DBEnv::new(db_environment());
     let time = SystemTime::now();
     let sha256 = db_env.commit(args.sha256, args.parents, time, args.comment)?;
-    println!("{}", sha256_to_hex(&sha256));
+    print!("{}", sha256_to_hex(&sha256));
     Ok(())
 }
 
