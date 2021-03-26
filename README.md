@@ -25,12 +25,10 @@ object files, the first functioning commit is the third one.
   - [x] read_sha1_file
   - [x] write_sha1_file
   - [x] check_valid_sha1
-- [ ] Binaries:
+- [x] Binaries:
   - [x] init-db
   - [x] write-tree
   - [x] read-tree
   - [x] update-cache
   - [x] commit-tree
-  - [ ] show-diff
-  - [ ] cat-file
-- [ ] And sufficient tests for all of them
+- [x] And sufficient tests for all of them
