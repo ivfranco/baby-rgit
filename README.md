@@ -9,6 +9,7 @@ object files, the first functioning commit is the third one.
 - A lot of the entries in the original `cache_entry` will be missing, device number / uid / gid /
   inode as a concept doesn't exist on a few platforms supported by stable Rust, hopefully the extra
   robustness of SHA256 over SHA1 would be sufficient for the purpose.
+- Commits do not contain committer information -- again not available on windows and such.
 - Environmental variable controls the location of everything, not only the object store.
 
 # Plans
@@ -24,12 +25,12 @@ object files, the first functioning commit is the third one.
   - [x] read_sha1_file
   - [x] write_sha1_file
   - [x] check_valid_sha1
-- [ ] Binaries
+- [ ] Binaries:
   - [x] init-db
   - [x] write-tree
   - [x] read-tree
   - [x] update-cache
-  - [ ] commit-tree
+  - [x] commit-tree
   - [ ] show-diff
   - [ ] cat-file
-- [ ] Sufficient tests for all of them
+- [ ] And sufficient tests for all of them

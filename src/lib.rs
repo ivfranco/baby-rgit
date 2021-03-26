@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![allow(clippy::clippy::upper_case_acronyms)]
 
 //! A Rust clone of the very first commit of git.
 
@@ -40,6 +41,10 @@ pub enum Error {
     /// Integer overflow errors.
     #[error("Integer overflow: {0}")]
     Overflow(&'static str),
+
+    /// Packing an empty cache.
+    #[error("Packing an empty cache")]
+    PackEmptyCache,
 }
 
 impl Debug for Error {

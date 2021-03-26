@@ -7,6 +7,9 @@ resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+doctest = false
+
 [[bin]]
 name = "init_db"
 test = false
@@ -27,6 +30,11 @@ name = "read_tree"
 test = false
 doctest = false
 
+[[bin]]
+name = "commit_tree"
+test = false
+doctest = false
+
 [dependencies]
 sha2 = "0.9.3"
 flate2 = "1.0.20"
@@ -40,3 +48,7 @@ argh = "^0.1"
 [dev-dependencies]
 tempfile = "3.2.0"
 rand = "^0.8"
+assert_cmd = "1.0.3"
+predicates = "1.0.7"
+walkdir = "2.3.2"
+

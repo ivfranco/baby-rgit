@@ -5,7 +5,7 @@ use std::{
     process,
 };
 
-use crate::cache::{DB_ENVIRONMENT, DEFAULT_DB_ENVIRONMENT};
+use crate::cache::{hex_to_sha256, SHA256Output, DB_ENVIRONMENT, DEFAULT_DB_ENVIRONMENT};
 
 /// Get path of the directory cache and object store. Default to
 /// [DEFAULT_DB_ENVIRONMENT](DEFAULT_DB_ENVIRONMENT) when the environment variable doesn't exist or
@@ -24,7 +24,7 @@ pub fn db_environment() -> String {
 
 /// Print error message to stderr then exit with non-zero exit code.
 pub fn error_exit<T: Display>(error: T) -> ! {
-    eprintln!("{}", error);
+    eprintln!("{:#}", error);
     process::exit(1);
 }
 
@@ -48,4 +48,9 @@ pub fn verify_path(path: &str) -> bool {
     } else {
         true
     }
+}
+
+/// Parse a hex ASCII string as SHA256 output.
+pub fn sha256_from_str(str: &str) -> Result<SHA256Output, String> {
+    hex_to_sha256(str).ok_or_else(|| "argument is not valid sha256".to_string())
 }

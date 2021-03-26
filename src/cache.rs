@@ -26,13 +26,14 @@ pub const DEFAULT_DB_ENVIRONMENT: &str = ".dircache";
 /// Location of cache index file under cache directory.
 pub const INDEX_LOCATION: &str = "index";
 
-const OBJECT_STORE_LOCATION: &str = "objects";
+/// Subdirectory of the object store.
+pub const OBJECT_STORE_LOCATION: &str = "objects";
 
 const SHA256_OUTPUT_LEN: usize = 32;
 
 /// Output of SHA256 hash algorithm as a fixed-length byte array.
 pub type SHA256Output = [u8; SHA256_OUTPUT_LEN];
-const CACHE_SIGNATURE: u32 = u32::from_be_bytes(*b"DIRC");
+const CACHE_SIGNATURE: u32 = u32::from_le_bytes(*b"DIRC");
 const CACHE_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -159,6 +160,8 @@ pub enum ObjectType {
     Blob,
     /// A list of metadata and blob data sorted by name.
     Tree,
+    /// A commit recording author and relations between trees.
+    Commit,
 }
 
 impl ObjectType {
@@ -166,6 +169,7 @@ impl ObjectType {
         match self {
             ObjectType::Blob => "blob",
             ObjectType::Tree => "tree",
+            ObjectType::Commit => "commit",
         }
     }
 }
@@ -190,6 +194,7 @@ impl ObjectHeader {
         let ty = match deserialize_from::<_, String>(&mut *reader)?.as_str() {
             "blob" => ObjectType::Blob,
             "tree" => ObjectType::Tree,
+            "commit" => ObjectType::Commit,
             _ => return Err(Error::CorruptedObject("unknown object type")),
         };
 
@@ -233,6 +238,11 @@ impl<'a> TreeObject<'a> {
         Self { entries }
     }
 
+    fn pack(&self, db_env: &DBEnv) -> Result<SHA256Output, Error> {
+        let buf = serialize(self)?;
+        db_env.write_sha256_file(ObjectType::Tree, &mut buf.as_slice(), buf.len() as u64)
+    }
+
     fn unpack(&self, db_env: &DBEnv) -> Result<(), Error> {
         for TreeObjectEntry { name, sha256 } in &self.entries {
             let mut file = recreate_file(name)?;
@@ -251,7 +261,9 @@ fn recreate_file(path: &str) -> Result<File, Error> {
     let fd = match File::create(path) {
         Ok(fd) => fd,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            recreate_directories(path)?;
+            if let Some(parent) = Path::new(path).parent() {
+                fs::create_dir_all(parent)?;
+            }
             File::create(path)?
         }
         Err(e) => return Err(From::from(e)),
@@ -260,18 +272,12 @@ fn recreate_file(path: &str) -> Result<File, Error> {
     Ok(fd)
 }
 
-fn recreate_directories(path: &str) -> Result<(), Error> {
-    let mut ancestors: Vec<_> = Path::new(path).ancestors().collect();
-    // Path::ancestors is deepest first
-    ancestors.reverse();
-
-    for ancestor in ancestors {
-        if !ancestor.is_dir() {
-            fs::create_dir(ancestor)?;
-        }
-    }
-
-    Ok(())
+#[derive(Serialize, Deserialize)]
+struct CommitObject {
+    tree: SHA256Output,
+    parents: Vec<SHA256Output>,
+    time: SystemTime,
+    comment: String,
 }
 
 /// Object database environment, should be the only interface to all things in
@@ -323,11 +329,11 @@ impl DBEnv {
         })
     }
 
-    fn obj_store(&self) -> &Path {
+    fn obj_store_path(&self) -> &Path {
         self.obj_store.as_path()
     }
 
-    fn cache_index(&self) -> &Path {
+    fn cache_index_path(&self) -> &Path {
         self.cache_index.as_path()
     }
 
@@ -337,7 +343,7 @@ impl DBEnv {
     }
 
     fn write_sha256_buffer(&self, sha256: &SHA256Output, buf: &[u8]) -> Result<(), Error> {
-        let path = sha256_file_name(self.obj_store(), sha256);
+        let path = sha256_file_name(self.obj_store_path(), sha256);
 
         let mut fd = match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(fd) => fd,
@@ -362,7 +368,7 @@ impl DBEnv {
     /// # C counterpart:
     /// read-cache.c#read_sha1_file
     pub fn read_sha256_file(&self, sha256: &SHA256Output) -> Result<(ObjectType, Vec<u8>), Error> {
-        let path = sha256_file_name(self.obj_store(), sha256);
+        let path = sha256_file_name(self.obj_store_path(), sha256);
         let fd = File::open(path)?;
         let mut reader = ZlibDecoder::new(BufReader::new(fd));
 
@@ -408,7 +414,7 @@ impl DBEnv {
     /// # C counterpart:
     /// write-tree.c#check_valid_sha1
     pub fn check_sha256_inplace(&self, sha256: &SHA256Output) -> Result<(), Error> {
-        let path = sha256_file_name(self.obj_store(), sha256);
+        let path = sha256_file_name(self.obj_store_path(), sha256);
         let fd = File::open(path)?;
         let mut reader = BufReader::new(fd);
 
@@ -440,6 +446,25 @@ impl DBEnv {
 
         Ok(())
     }
+
+    /// Commit a SHA256-indexed tree object.
+    pub fn commit(
+        &self,
+        tree: SHA256Output,
+        parents: Vec<SHA256Output>,
+        time: SystemTime,
+        comment: String,
+    ) -> Result<SHA256Output, Error> {
+        let commit = CommitObject {
+            tree,
+            parents,
+            time,
+            comment,
+        };
+
+        let buf = serialize(&commit)?;
+        self.write_sha256_file(ObjectType::Commit, &mut buf.as_slice(), buf.len() as u64)
+    }
 }
 
 /// A directory cache. All global variables go in here.
@@ -456,14 +481,24 @@ pub struct DirCache {
 }
 
 impl DirCache {
+    /// The number of active cache entries.
+    pub fn entries(&self) -> usize {
+        self.active_cache.len()
+    }
+
     /// # C counterpart:
     /// extracted from init-db.c
     pub fn init<P: AsRef<Path>>(db_environment: P) -> Result<Self, Error> {
         let db_environment = DBEnv::init(db_environment)?;
-        Ok(Self {
+        let index = File::create(db_environment.cache_index_path())?;
+
+        let this = Self {
             db_env: db_environment,
             active_cache: BTreeMap::new(),
-        })
+        };
+        this.write_index(&index)?;
+
+        Ok(this)
     }
 
     /// Initialize the cache information from index file.
@@ -474,9 +509,9 @@ impl DirCache {
         let db_environment = DBEnv::new(db_environment);
         // there's no way to check permission to a dir, instead try read its contents and return
         // whatever error the read operation returns
-        fs::read_dir(db_environment.obj_store())?;
+        fs::read_dir(db_environment.obj_store_path())?;
 
-        let mut fd = BufReader::new(File::open(db_environment.cache_index())?);
+        let mut fd = BufReader::new(File::open(db_environment.cache_index_path())?);
         let size = fd.get_ref().metadata()?.len();
         let header = CacheHeader::read_and_verify(&mut fd, size)?;
 
@@ -579,10 +614,12 @@ impl DirCache {
     /// # C counterpart
     /// extracted from write-tree.c
     pub fn pack(&self) -> Result<SHA256Output, Error> {
+        if self.active_cache.is_empty() {
+            return Err(Error::PackEmptyCache);
+        }
+
         let tree = TreeObject::new(self);
-        let buf = serialize(&tree)?;
-        self.db_env
-            .write_sha256_file(ObjectType::Tree, &mut buf.as_slice(), buf.len() as u64)
+        tree.pack(&self.db_env)
     }
 }
 
@@ -599,6 +636,15 @@ fn byte_to_hex(byte: u8) -> [u8; 2] {
     let l = byte & 0b1111;
 
     [valhex(h).unwrap(), valhex(l).unwrap()]
+}
+
+/// Convert SHA256 output to a hex ASCII string.
+pub fn sha256_to_hex(sha256: &SHA256Output) -> String {
+    sha256
+        .iter()
+        .flat_map(|&b| std::array::IntoIter::new(byte_to_hex(b)))
+        .map(char::from)
+        .collect()
 }
 
 // <$path>/<first two digits of SHA256>/<rest digits of sha256>
@@ -632,7 +678,9 @@ fn hexval(char: u8) -> Option<u8> {
 /// Convert a hex ASCII string to 32-bytes of SHA256 output.
 pub fn hex_to_sha256(hex: &str) -> Option<SHA256Output> {
     let bytes = hex.as_bytes();
-    assert_eq!(bytes.len(), 64);
+    if bytes.len() != SHA256_OUTPUT_LEN * 2 {
+        return None;
+    }
 
     let mut sha256 = SHA256Output::default();
 
@@ -729,7 +777,7 @@ mod tests {
             cache.insert(rng.gen());
         }
 
-        let index = File::create(cache.db_env.cache_index()).unwrap();
+        let index = File::create(cache.db_env.cache_index_path()).unwrap();
         cache.write_index(&index).unwrap();
 
         let dir_cache = DirCache::read_index(&db_env).unwrap();
@@ -775,5 +823,23 @@ mod tests {
 
         assert_eq!(ty, ObjectType::Blob);
         assert_eq!(deflated, buf);
+    }
+
+    #[test]
+    fn tree_pack_unpack() {
+        let dir = TempDir::new().unwrap();
+        let mut cache = DirCache::init(dir.path().join(DEFAULT_DB_ENVIRONMENT)).unwrap();
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..rng.gen_range(1..100) {
+            cache.insert(rng.gen());
+        }
+
+        let sha256 = cache.pack().unwrap();
+        let (ty, buf) = cache.db_env.read_sha256_file(&sha256).unwrap();
+        assert_eq!(ty, ObjectType::Tree);
+
+        let unpack: TreeObject = deserialize(&buf).unwrap();
+        assert_eq!(unpack, TreeObject::new(&cache));
     }
 }
