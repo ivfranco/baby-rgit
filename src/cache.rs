@@ -8,7 +8,7 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     convert::TryFrom,
-    fs::{self, File, OpenOptions},
+    fs::{self, File, Metadata, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::from_utf8,
@@ -138,7 +138,7 @@ impl FileType {
     }
 }
 
-/// Captured status of the cached file.
+/// A snapshot of the status of a file.
 ///
 /// A lot of the entries in the original C implementation will be missing, device number / uid / gid
 /// / inode as a concept doesn't exist on a few platforms supported by stable Rust, hopefully the
@@ -155,12 +155,33 @@ pub struct FileStats {
     pub size: u64,
 }
 
+impl TryFrom<&Metadata> for FileStats {
+    type Error = crate::Error;
+
+    fn try_from(metadata: &Metadata) -> Result<Self, Self::Error> {
+        let created = CacheTime::try_from(metadata.created()?)?;
+        let modified = CacheTime::try_from(metadata.modified()?)?;
+        let mode = FileType::new(metadata.file_type());
+        let size = metadata.len();
+
+        Ok(FileStats {
+            created,
+            modified,
+            mode,
+            size,
+        })
+    }
+}
+
 /// An entry of th directory cache, describing a single blob file.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CacheEntry {
-    stats: FileStats,
-    sha256: SHA256Output,
-    name: String,
+    /// Captured status of the cached file.
+    pub stats: FileStats,
+    /// SHA256 hash of the cached file.
+    pub sha256: SHA256Output,
+    /// Name of the cached file.
+    pub name: String,
 }
 
 /// Types of objects in the object store.
@@ -497,6 +518,11 @@ impl DirCache {
         self.active_cache.len()
     }
 
+    /// Active directory cache entries currently loaded in memory.
+    pub fn active_cache(&self) -> impl Iterator<Item = &CacheEntry> + '_ {
+        self.active_cache.values()
+    }
+
     /// # C counterpart:
     /// extracted from init-db.c
     pub fn init<P: AsRef<Path>>(db_environment: P) -> Result<Self, Error> {
@@ -594,17 +620,7 @@ impl DirCache {
         };
 
         let metadata = fd.metadata()?;
-        let created = CacheTime::try_from(metadata.created()?)?;
-        let modified = CacheTime::try_from(metadata.modified()?)?;
-        let mode = FileType::new(metadata.file_type());
-        let size = metadata.len();
-
-        let stats = FileStats {
-            created,
-            modified,
-            mode,
-            size,
-        };
+        let stats = FileStats::try_from(&metadata)?;
 
         let sha256 = self.db_env.index_file(fd, &stats)?;
 

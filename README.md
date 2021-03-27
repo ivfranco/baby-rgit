@@ -31,4 +31,5 @@ object files, the first functioning commit is the third one.
   - [x] read-tree
   - [x] update-cache
   - [x] commit-tree
+  - [x] show-diff
 - [x] And sufficient tests for all of them

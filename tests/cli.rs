@@ -7,6 +7,7 @@ use std::{
 };
 
 use assert_cmd::Command;
+use predicates::str::contains;
 use rand::{Rng, RngCore};
 use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, TempDir};
@@ -238,4 +239,51 @@ fn cli_commit_tree() {
 
     let (ty, _) = cache.db_env.read_sha256_file(&commit_sha256).unwrap();
     assert_eq!(ty, ObjectType::Commit);
+}
+
+#[test]
+fn cli_commit_tree_empty_comment() {
+    let temp = TempDir::new().unwrap();
+
+    let mut rng = rand::thread_rng();
+    let cache = random_cache(&mut rng, temp.path());
+
+    let tree_sha256 = cache.pack().unwrap();
+
+    Command::cargo_bin("commit_tree")
+        .unwrap()
+        .current_dir(&temp)
+        .arg(sha256_to_hex(&tree_sha256))
+        .args(&["-c", ""])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn cli_show_diff() {
+    let temp = TempDir::new().unwrap();
+    let db_env = temp.path().join(DEFAULT_DB_ENVIRONMENT);
+    let mut cache = DirCache::init(&db_env).unwrap();
+
+    let path = temp.path().join("README.md");
+    let mut file = File::create(&path).unwrap();
+
+    write!(&mut file, "aaa\nbbb\nccc\n").unwrap();
+    file.flush().unwrap();
+
+    cache.add_file(&path.to_str().unwrap()).unwrap();
+    let index = File::create(db_env.join(INDEX_LOCATION)).unwrap();
+    cache.write_index(&index).unwrap();
+
+    writeln!(&mut file, "ddd").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    drop(cache);
+
+    Command::cargo_bin("show_diff")
+        .unwrap()
+        .current_dir(&temp)
+        .assert()
+        .success()
+        .stdout(contains("ddd"));
 }
