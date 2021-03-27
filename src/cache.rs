@@ -8,7 +8,7 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     convert::TryFrom,
-    fs::{self, File, FileType, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::from_utf8,
@@ -87,7 +87,7 @@ impl CacheHeader {
 /// The lower 32 bits of times (creation or modification), only used to verify if the file changed
 /// since last time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-struct CacheTime {
+pub struct CacheTime {
     sec: u32,
     nsec: u32,
 }
@@ -111,15 +111,18 @@ bitflags! {
     /// - FileType::is_symlink
     #[repr(transparent)] /* make sure it has the same size as a u32 */
     #[derive(Serialize, Deserialize)]
-    struct FileMode: u32 {
+    pub struct FileType: u32 {
+        /// This entry is a directory.
         const IS_DIR        = 0b0001;
+        /// This entry is a file.
         const IS_FILE       = 0b0010;
+        /// This entry is a symbolic link.
         const IS_SYMLINK    = 0b0100;
     }
 }
 
-impl FileMode {
-    fn new(file_type: FileType) -> Self {
+impl FileType {
+    fn new(file_type: fs::FileType) -> Self {
         let mut flags = Self::empty();
         if file_type.is_dir() {
             flags.insert(Self::IS_DIR);
@@ -135,19 +138,26 @@ impl FileMode {
     }
 }
 
+/// Captured status of the cached file.
+///
 /// A lot of the entries in the original C implementation will be missing, device number / uid / gid
 /// / inode as a concept doesn't exist on a few platforms supported by stable Rust, hopefully the
 /// extra robustness of SHA256 over SHA1 would be sufficient for the purpose.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-struct FileStats {
-    created: CacheTime,
-    modified: CacheTime,
-    mode: FileMode,
-    size: u64,
+pub struct FileStats {
+    /// When the file is created.
+    pub created: CacheTime,
+    /// When the file is modified last time.
+    pub modified: CacheTime,
+    /// The type of the file.
+    pub mode: FileType,
+    /// Size of the file.
+    pub size: u64,
 }
 
+/// An entry of th directory cache, describing a single blob file.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub(crate) struct CacheEntry {
+pub struct CacheEntry {
     stats: FileStats,
     sha256: SHA256Output,
     name: String,
@@ -586,7 +596,7 @@ impl DirCache {
         let metadata = fd.metadata()?;
         let created = CacheTime::try_from(metadata.created()?)?;
         let modified = CacheTime::try_from(metadata.modified()?)?;
-        let mode = FileMode::new(metadata.file_type());
+        let mode = FileType::new(metadata.file_type());
         let size = metadata.len();
 
         let stats = FileStats {
@@ -712,10 +722,10 @@ mod tests {
         }
     }
 
-    impl Distribution<FileMode> for Standard {
-        fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> FileMode {
-            let bits = rng.gen_range(0..=FileMode::all().bits());
-            FileMode::from_bits(bits).unwrap()
+    impl Distribution<FileType> for Standard {
+        fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> FileType {
+            let bits = rng.gen_range(0..=FileType::all().bits());
+            FileType::from_bits(bits).unwrap()
         }
     }
 

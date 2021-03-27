@@ -44,6 +44,7 @@ bitflags = "1.2.1"
 anyhow = "1.0.39"
 thiserror = "1.0.24"
 argh = "^0.1"
+difference = "2.0.0"
 
 [dev-dependencies]
 tempfile = "3.2.0"
