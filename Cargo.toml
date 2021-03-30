@@ -1,6 +1,6 @@
 [package]
 name = "baby-rgit"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["ivfranco <ivfranco33@protonmail.com>"]
 edition = "2018"
 resolver = "2"
